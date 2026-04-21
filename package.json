@@ -1,0 +1,24 @@
+{
+  "name": "tender-procurement-tracker",
+  "version": "1.0.0",
+  "description": "Multi-source Tender & Procurement Tracker — scrapes global portals, classifies by category, filters by ICP relevance",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node src/main.js"
+  },
+  "dependencies": {
+    "apify": "^3.2.2",
+    "crawlee": "^3.9.0",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "dayjs": "^1.11.13",
+    "fuse.js": "^7.0.0",
+    "p-limit": "^5.0.0",
+    "user-agents": "^1.1.312"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
