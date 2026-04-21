@@ -83,15 +83,11 @@
       "default": ["sam_gov", "ted_europa", "gem_india", "find_a_tender_uk", "ungm", "worldbank"]
     },
     "proxy_config": {
-      "title": "Proxy Configuration",
-      "description": "Apify proxy settings",
-      "editor": "proxy",
-      "type": "object",
-      "schemaDef": {
-        "useApifyProxy": { "type": "boolean", "default": true },
-        "apifyProxyGroups": { "type": "array", "items": { "type": "string" }, "default": [] }
-      }
-    }
-  },
+  "title": "Proxy Configuration",
+  "type": "object",
+  "description": "Select proxies to be used by the crawler.",
+  "default": { "useApifyProxy": true },
+  "editor": "proxy"
+},
   "required": ["keywords"]
 }
