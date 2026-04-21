@@ -1,0 +1,9 @@
+{
+  "actorSpecification": 1,
+  "name": "tender-procurement-tracker",
+  "title": "Tender & Procurement Tracker",
+  "description": "Multi-source global tender scraper with AI-powered category classification. Covers SAM.gov, TED Europa, GEM India, UK Find-a-Tender, UNGM, World Bank, and more.",
+  "version": "1.0.0",
+  "input": "./input_schema.json",
+  "dockerfile": "../Dockerfile"
+}
