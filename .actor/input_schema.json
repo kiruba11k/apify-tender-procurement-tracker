@@ -1,0 +1,97 @@
+{
+  "title": "Tender & Procurement Tracker",
+  "description": "Track live tenders, RFPs and government procurement across global portals.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "keywords": {
+      "title": "Keywords",
+      "description": "Search keywords — e.g. ERP, cloud migration, cybersecurity, consulting",
+      "type": "array",
+      "items": { "type": "string" },
+      "editor": "stringList",
+      "default": []
+    },
+    "company_names": {
+      "title": "Company / Buyer Names",
+      "description": "Filter by specific buyer/organization names (optional)",
+      "type": "array",
+      "items": { "type": "string" },
+      "editor": "stringList",
+      "default": []
+    },
+    "industry": {
+      "title": "Industry",
+      "description": "Target industry for ICP filtering",
+      "type": "string",
+      "editor": "select",
+      "enum": ["All", "Technology", "Healthcare", "Finance", "Education", "Government", "Construction", "Energy", "Defense", "Logistics"],
+      "default": "All"
+    },
+    "regions": {
+      "title": "Regions",
+      "description": "Target regions to scrape",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["US", "EU", "UK", "India", "Canada", "Australia", "Global"]
+      },
+      "editor": "select",
+      "default": ["US", "EU", "India"]
+    },
+    "budget_threshold": {
+      "title": "Minimum Budget (USD)",
+      "description": "Exclude tenders below this value. Set 0 to disable.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 10000
+    },
+    "max_results": {
+      "title": "Max Results",
+      "description": "Maximum tenders to return across all sources",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 200
+    },
+    "include_closed": {
+      "title": "Include Closed Tenders",
+      "description": "Also return recently closed (past 7 days) tenders",
+      "type": "boolean",
+      "default": false
+    },
+    "sources": {
+      "title": "Sources to Scrape",
+      "description": "Select which procurement portals to include",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "sam_gov",
+          "ted_europa",
+          "merx_canada",
+          "gem_india",
+          "find_a_tender_uk",
+          "ungm",
+          "devex",
+          "worldbank",
+          "iadb",
+          "austendering"
+        ]
+      },
+      "editor": "select",
+      "default": ["sam_gov", "ted_europa", "gem_india", "find_a_tender_uk", "ungm", "worldbank"]
+    },
+    "proxy_config": {
+      "title": "Proxy Configuration",
+      "description": "Apify proxy settings",
+      "editor": "proxy",
+      "type": "object",
+      "schemaDef": {
+        "useApifyProxy": { "type": "boolean", "default": true },
+        "apifyProxyGroups": { "type": "array", "items": { "type": "string" }, "default": [] }
+      }
+    }
+  },
+  "required": ["keywords"]
+}
