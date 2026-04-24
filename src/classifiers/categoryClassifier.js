@@ -67,12 +67,39 @@ const CATEGORY_RULES = {
   },
 };
 
+// Stopwords to ignore during keyword splitting
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'from', 'with', 'this', 'that', 'are', 'was',
+  'has', 'have', 'its', 'not', 'all', 'but', 'can', 'our', 'their',
+  'will', 'into', 'than', 'more', 'also', 'any', 'been', 'may',
+  'bid', 'tender', 'tenders', 'rfp', 'rfi', 'rfq', 'procurement',
+  'contract', 'services', 'service', 'supply', 'provision', 'request',
+]);
+
 /**
- * Classify a tender based on title + description text
- * Returns best-match category and confidence score
- * @param {string} title
- * @param {string} description
- * @returns {{ category: string, confidence: number, allMatches: Array }}
+ * Split a multi-word keyword phrase into individual meaningful search terms.
+ * e.g. "Cardiff Metropolitan University ERP Tenders" → ['cardiff', 'metropolitan', 'university', 'erp']
+ */
+export function splitKeywords(keywords = []) {
+  const terms = new Set();
+  for (const kw of keywords) {
+    const words = kw.toLowerCase().split(/[\s,;|/\\+&]+/);
+    for (const word of words) {
+      const clean = word.replace(/[^a-z0-9]/g, '');
+      if (clean.length >= 3 && !STOPWORDS.has(clean)) {
+        terms.add(clean);
+      }
+    }
+    // Also keep the original phrase if it's short (≤4 words) — may be an acronym/product name
+    const wordCount = kw.trim().split(/\s+/).length;
+    if (wordCount <= 4) terms.add(kw.toLowerCase().trim());
+  }
+  return [...terms];
+}
+
+/**
+ * Classify a tender based on title + description text.
+ * Returns best-match category and confidence score.
  */
 export function classifyTender(title = '', description = '') {
   const text = `${title} ${description}`.toLowerCase();
@@ -82,7 +109,6 @@ export function classifyTender(title = '', description = '') {
     let score = 0;
     for (const kw of rule.keywords) {
       if (text.includes(kw)) {
-        // Longer keyword = more specific = higher score
         score += (kw.length / 5) * rule.weight;
       }
     }
@@ -94,7 +120,7 @@ export function classifyTender(title = '', description = '') {
   if (sorted.length === 0) return { category: 'Other', confidence: 0, allMatches: [] };
 
   const topScore = sorted[0][1];
-  const maxPossible = 20; // rough normalizer
+  const maxPossible = 20;
   const confidence = Math.min(100, Math.round((topScore / maxPossible) * 100));
 
   return {
@@ -105,17 +131,29 @@ export function classifyTender(title = '', description = '') {
 }
 
 /**
- * Check if a tender is ICP-relevant given user keywords + industry
+ * Check if a tender is ICP-relevant given user keywords + industry.
+ *
+ * FIX: Keywords are split into individual significant terms before matching,
+ * so a phrase like "Cardiff Metropolitan University ERP Tenders" correctly
+ * matches tenders containing any of: "cardiff", "metropolitan", "university", "erp".
  */
 export function isIcpRelevant(tender, keywords = [], industry = 'All') {
+  // No filters at all → everything passes
   if (!keywords.length && industry === 'All') return true;
 
   const text = `${tender.tender_title} ${tender.description || ''} ${tender.organization_name}`.toLowerCase();
 
-  // Keyword match
-  const kwMatch = keywords.length === 0 || keywords.some(kw => text.includes(kw.toLowerCase()));
+  let kwMatch = true;
+  if (keywords.length > 0) {
+    // Split each keyword phrase into individual meaningful terms
+    const terms = splitKeywords(keywords);
 
-  // Industry match
+    if (terms.length > 0) {
+      // Pass if ANY term matches (OR logic across all extracted terms)
+      kwMatch = terms.some(term => text.includes(term));
+    }
+  }
+
   const industryMap = {
     'Technology': ['ERP', 'Cloud Services', 'Cybersecurity', 'IT Consulting', 'Software Development', 'Data & Analytics', 'Networking & Infrastructure', 'CRM', 'Education Technology'],
     'Healthcare': ['Healthcare IT'],
