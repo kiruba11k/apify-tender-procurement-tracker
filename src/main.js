@@ -3,23 +3,6 @@
  * ║        TENDER & PROCUREMENT TRACKER — Apify Actor                   ║
  * ║  Multi-source • AI-classified • ICP-filtered • Global coverage       ║
  * ╚══════════════════════════════════════════════════════════════════════╝
- *
- * KEY FIXES in this version:
- *
- * 1. KEYWORD SPLITTING: User keyword phrases like "Cardiff Metropolitan
- *    University ERP Tenders" are now split into individual meaningful
- *    terms before being passed to each scraper (using the existing
- *    splitKeywords() util). Without this, no scraper API can match the
- *    full 5-word phrase and they fall back to returning latest tenders
- *    instead of keyword-relevant ones.
- *
- * 2. NEW SOURCES added:
- *    - contracts_finder: UK Contracts Finder (replaces Devex, no auth)
- *    - ebrd:  European Bank for Reconstruction & Development (JSON API)
- *    - adb:   Asian Development Bank (HTML, Asia-Pacific)
- *
- * 3. Industry filter only — no keyword re-filtering after scrape.
- *    Each scraper already searched by keyword at the source.
  */
 
 import { Actor, log } from 'apify';
@@ -56,7 +39,6 @@ const SOURCE_MAP = {
   austendering:      { fn: scrapeAusTendering,     region: 'Australia',    label: 'AusTendering' },
 };
 
-// Global sources that run regardless of region selection
 const ALWAYS_ON = new Set(['ungm', 'worldbank', 'ebrd']);
 
 const REGION_SOURCE_MAP = {
@@ -97,14 +79,7 @@ await Actor.main(async () => {
     proxy_config     = { useApifyProxy: true },
   } = input || {};
 
-  log.info('╔══════════════════════════════════════════════╗');
-  log.info('║   Tender & Procurement Tracker — Starting    ║');
-  log.info('╚══════════════════════════════════════════════╝');
-  log.info(`Keywords : ${keywords.join(', ') || '(none)'}`);
-  log.info(`Industry : ${industry}`);
-  log.info(`Regions  : ${regions.join(', ')}`);
-  log.info(`Budget ≥ : $${budget_threshold.toLocaleString()}`);
-  log.info(`Closed?  : ${include_closed}`);
+  log.info('🚀 Starting Tender Tracker with Strict Company Filtering...');
 
   // ── Resolve proxy ──────────────────────────────────────────────────────────
   let proxyUrl = null;
@@ -112,166 +87,100 @@ await Actor.main(async () => {
     if (proxy_config?.useApifyProxy) {
       const proxyConfig = await Actor.createProxyConfiguration(proxy_config);
       proxyUrl = await proxyConfig.newUrl();
-      log.info('Proxy    : configured');
+      log.info('Proxy configured successfully.');
     }
-  } catch {
-    log.warning('Proxy init failed — running without proxy');
+  } catch (e) {
+    log.warning('Proxy initialization failed, continuing without proxy.');
   }
 
-  // ── KEYWORD SPLITTING ──────────────────────────────────────────────────────
-  // FIX: Split user keyword phrases into individual meaningful search terms.
-  //
-  // Example: ["Cardiff Metropolitan University ERP Tenders"]
-  //       → ["cardiff", "metropolitan", "university", "erp"]
-  //
-  // This is critical — search APIs cannot match a 5-word exact phrase.
-  // Without splitting, all scrapers get zero results and fall back to
-  // returning the most recent tenders (unfiltered by keyword).
-  //
-  // Note: splitKeywords strips stopwords like "tender", "service", etc.
-  // so only meaningful search terms are passed to each scraper API.
-  const searchKeywords = keywords.length > 0
-    ? splitKeywords(keywords)
-    : [];  // empty = each scraper uses its default keywords
-
-  log.info(`Search terms: ${searchKeywords.join(', ') || '(defaults per source)'}`);
+  // ── KEYWORD SPLITTING & QUOTING ────────────────────────────────────────────
+  // FIX: We split terms for broad API matching but ALSO include the full phrase 
+  // in quotes to force exact matches on platforms that support it.
+  const splitTerms = splitKeywords(keywords);
+  const quotedPhrases = keywords.map(k => `"${k}"`);
+  const searchKeywords = [...new Set([...splitTerms, ...quotedPhrases])];
 
   const activeSources = resolveActiveSources(regions);
-  log.info(`Sources  : ${activeSources.map(s => SOURCE_MAP[s].label).join(', ')}\n`);
+  log.info(`Searching ${activeSources.length} sources for: ${searchKeywords.join(', ')}`);
 
   // ── Parallel scraping ─────────────────────────────────────────────────────
-  const limiter = pLimit(3);
-  const perSourceLimit = Math.ceil(max_results / activeSources.length) + 20;
+  // Lowered concurrency (limiter 2) to reduce "getaddrinfo" and DNS failures
+  const limiter = pLimit(2); 
+  const perSourceLimit = Math.ceil(max_results / activeSources.length) + 15;
   const scrapeArgs = { keywords: searchKeywords, maxResults: perSourceLimit, proxyUrl };
   const allRaw = [];
 
   const tasks = activeSources.map(sourceKey =>
     limiter(async () => {
       const src = SOURCE_MAP[sourceKey];
-      log.info(`[${src.label}] Starting...`);
       try {
         const items = await src.fn(scrapeArgs);
-        log.info(`[${src.label}] ✓ ${items.length} items`);
         allRaw.push(...items);
       } catch (err) {
-        log.error(`[${src.label}] ✗ ${err.message}`);
+        log.error(`[${src.label}] Connection/API error: ${err.message}`);
       }
     })
   );
 
   await Promise.all(tasks);
-  log.info(`\nRaw total: ${allRaw.length}`);
 
   // ── Post-processing ────────────────────────────────────────────────────────
   resetDedup();
   const dataset = await Actor.openDataset();
   let savedCount = 0;
-  const stats = {
-    total_raw:         allRaw.length,
-    expired_removed:   0,
-    budget_filtered:   0,
-    industry_filtered: 0,
-    duplicates_removed:0,
-    saved:             0,
-  };
-
-  // Open tenders first, newest first
+  
+  // Sort by Status (Open first) then by Date (Newest first)
   const sorted = allRaw.sort((a, b) => {
     if (a.tender_status === 'Open' && b.tender_status !== 'Open') return -1;
     if (b.tender_status === 'Open' && a.tender_status !== 'Open') return 1;
-    return dayjs(b.announcement_date || '2000-01-01').valueOf()
-         - dayjs(a.announcement_date || '2000-01-01').valueOf();
+    return dayjs(b.announcement_date || '2000-01-01').valueOf() - dayjs(a.announcement_date || '2000-01-01').valueOf();
   });
 
   for (const raw of sorted) {
     if (savedCount >= max_results) break;
 
-    // 1. Expired filter
+    // 1. Strict Company name filter (Solves "Public Toilet Cleaning" issue)
+    // If user provided company names, DISCARD anything that doesn't match.
+    if (company_names.length > 0) {
+      const orgLower = (raw.organization_name || '').toLowerCase();
+      const isCorrectCompany = company_names.some(cn => orgLower.includes(cn.toLowerCase()));
+      if (!isCorrectCompany) continue; 
+    }
+
+    // 2. Expired filter
     if (!include_closed && isExpired(raw.deadline)) {
-      if (!isRecentlyClosed(raw.deadline, 7)) {
-        stats.expired_removed++;
-        continue;
-      }
+      if (!isRecentlyClosed(raw.deadline, 7)) continue;
       raw.tender_status = 'Closed';
     }
 
-    // 2. Company name filter
-    if (company_names.length > 0) {
-      const orgLower = (raw.organization_name || '').toLowerCase();
-      if (!company_names.some(cn => orgLower.includes(cn.toLowerCase()))) continue;
-    }
-
-    // 3. Classify category (required before industry filter)
+    // 3. Classify and Noise Filter
     const { category, confidence } = classifyTender(raw.tender_title, raw.description);
+    
+    // Discard "Other" category items if confidence is extremely low (prevents irrelevant noise)
+    if (category === 'Other' && confidence < 15 && industry !== 'All') continue;
+
     raw.category = category;
 
-    // 4. Industry filter ONLY — no keyword re-filtering.
-    //    Each scraper already searched by keyword. Re-filtering here
-    //    incorrectly drops results whose visible text doesn't restate
-    //    the search terms (e.g. an ERP tender titled "Business Systems
-    //    Implementation" wouldn't contain the word "ERP").
-    if (!isIcpRelevant(raw, [], industry)) {
-      stats.industry_filtered++;
-      continue;
-    }
+    // 4. Industry filter
+    if (!isIcpRelevant(raw, [], industry)) continue;
 
     // 5. Budget threshold
-    if (budget_threshold > 0 && raw.budget_usd !== null && raw.budget_usd < budget_threshold) {
-      stats.budget_filtered++;
-      continue;
-    }
+    if (budget_threshold > 0 && raw.budget_usd !== null && raw.budget_usd < budget_threshold) continue;
 
     // 6. Deduplication
-    if (isDuplicate(raw)) {
-      stats.duplicates_removed++;
-      continue;
-    }
+    if (isDuplicate(raw)) continue;
 
-    // 7. Save
-    const record = {
-      organization_name:         raw.organization_name || 'Unknown',
-      tender_title:              raw.tender_title || 'Untitled',
-      tender_status:             raw.tender_status || 'Open',
-      category:                  raw.category,
-      budget:                    raw.budget_usd ? formatBudget(raw.budget_usd) : raw.budget_raw || null,
-      budget_usd:                raw.budget_usd || null,
-      deadline:                  raw.deadline || null,
-      announcement_date:         raw.announcement_date || null,
-      source_link:               raw.source_link,
-      source:                    raw.source,
-      region:                    raw.region,
-      country:                   raw.country || raw.buyer_state || null,
-      naics_code:                raw.naics_code || null,
-      cpv_codes:                 raw.cpv_codes || null,
-      bid_number:                raw.bid_number || null,
+    // 7. Save to Dataset
+    await dataset.pushData({
+      ...raw,
+      category,
+      budget: raw.budget_usd ? formatBudget(raw.budget_usd) : raw.budget_raw || null,
       classification_confidence: confidence,
-      scraped_at:                new Date().toISOString(),
-    };
-
-    await dataset.pushData(record);
+      scraped_at: new Date().toISOString(),
+    });
+    
     savedCount++;
-    stats.saved++;
-
-    if (savedCount % 25 === 0) log.info(`Progress: ${savedCount}/${max_results}`);
   }
 
-  // ── Run summary ───────────────────────────────────────────────────────────
-  const kvStore = await Actor.openKeyValueStore();
-  await kvStore.setValue('RUN_SUMMARY', {
-    run_date: new Date().toISOString(),
-    input: { keywords, industry, regions, budget_threshold },
-    search_terms_used: searchKeywords,
-    stats,
-    sources_used: activeSources.map(s => SOURCE_MAP[s].label),
-  });
-
-  log.info('\n╔══════════════════════════════════════════════╗');
-  log.info('║              RUN COMPLETE                    ║');
-  log.info('╚══════════════════════════════════════════════╝');
-  log.info(`Raw collected    : ${stats.total_raw}`);
-  log.info(`Expired removed  : ${stats.expired_removed}`);
-  log.info(`Budget filtered  : ${stats.budget_filtered}`);
-  log.info(`Industry filtered: ${stats.industry_filtered}`);
-  log.info(`Duplicates       : ${stats.duplicates_removed}`);
-  log.info(`✅ Saved         : ${stats.saved}`);
+  log.info(`✅ Run Complete. Saved ${savedCount} relevant tenders.`);
 });
