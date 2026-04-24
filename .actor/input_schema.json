@@ -6,7 +6,7 @@
   "properties": {
     "keywords": {
       "title": "Keywords",
-      "description": "Search keywords — e.g. ERP, cloud migration, cybersecurity, consulting",
+      "description": "Search keywords — e.g. ERP, cloud migration, cybersecurity, consulting. Can be phrases like 'Cardiff Metropolitan University ERP'.",
       "type": "array",
       "items": { "type": "string" },
       "editor": "stringList",
@@ -30,7 +30,7 @@
     },
     "regions": {
       "title": "Regions",
-      "description": "Target regions to scrape",
+      "description": "Target regions to scrape. Sources are auto-selected based on this.",
       "type": "array",
       "items": {
         "type": "string",
@@ -59,28 +59,6 @@
       "description": "Also return recently closed (past 7 days) tenders",
       "type": "boolean",
       "default": false
-    },
-    "sources": {
-      "title": "Sources to Scrape",
-      "description": "Select which procurement portals to include",
-      "type": "array",
-      "items": {
-        "type": "string",
-        "enum": [
-          "sam_gov",
-          "ted_europa",
-          "merx_canada",
-          "gem_india",
-          "find_a_tender_uk",
-          "ungm",
-          "devex",
-          "worldbank",
-          "iadb",
-          "austendering"
-        ]
-      },
-      "editor": "select",
-      "default": ["sam_gov", "ted_europa", "gem_india", "find_a_tender_uk", "ungm", "worldbank"]
     },
     "proxy_config": {
       "title": "Proxy Configuration",
