@@ -4,54 +4,69 @@
  * ║  Multi-source • AI-classified • ICP-filtered • Global coverage       ║
  * ╚══════════════════════════════════════════════════════════════════════╝
  *
- * Sources auto-selected by region. Users do NOT configure sources.
+ * KEY FIXES in this version:
  *
- * KEY FIX: Keywords are sent to each source's own search API.
- * We do NOT re-filter by keyword after scraping — that incorrectly
- * discards results the source already matched. Only `industry` is used
- * for post-scrape filtering.
+ * 1. KEYWORD SPLITTING: User keyword phrases like "Cardiff Metropolitan
+ *    University ERP Tenders" are now split into individual meaningful
+ *    terms before being passed to each scraper (using the existing
+ *    splitKeywords() util). Without this, no scraper API can match the
+ *    full 5-word phrase and they fall back to returning latest tenders
+ *    instead of keyword-relevant ones.
+ *
+ * 2. NEW SOURCES added:
+ *    - contracts_finder: UK Contracts Finder (replaces Devex, no auth)
+ *    - ebrd:  European Bank for Reconstruction & Development (JSON API)
+ *    - adb:   Asian Development Bank (HTML, Asia-Pacific)
+ *
+ * 3. Industry filter only — no keyword re-filtering after scrape.
+ *    Each scraper already searched by keyword at the source.
  */
 
 import { Actor, log } from 'apify';
 import pLimit from 'p-limit';
 import dayjs from 'dayjs';
-import { classifyTender, isIcpRelevant } from './classifiers/categoryClassifier.js';
+import { classifyTender, isIcpRelevant, splitKeywords } from './classifiers/categoryClassifier.js';
 import { isExpired, isRecentlyClosed, isDuplicate, resetDedup, formatBudget } from './utils/helpers.js';
-import { scrapeSamGov } from './scrapers/samGov.js';
-import { scrapeTedEuropa } from './scrapers/tedEuropa.js';
-import { scrapeGemIndia } from './scrapers/gemIndia.js';
+import { scrapeSamGov }       from './scrapers/samGov.js';
+import { scrapeTedEuropa }    from './scrapers/tedEuropa.js';
+import { scrapeGemIndia }     from './scrapers/gemIndia.js';
 import {
   scrapeFindATender,
+  scrapeContractsFinder,
   scrapeUNGM,
   scrapeWorldBank,
   scrapeMerxCanada,
   scrapeAusTendering,
-  scrapeDevex,
+  scrapeEBRD,
+  scrapeADB,
 } from './scrapers/otherSources.js';
 
 // ── Source registry ──────────────────────────────────────────────────────────
 const SOURCE_MAP = {
-  sam_gov:          { fn: scrapeSamGov,       region: 'US',        label: 'SAM.gov (US Federal)' },
-  ted_europa:       { fn: scrapeTedEuropa,    region: 'EU',        label: 'TED Europa (EU)' },
-  gem_india:        { fn: scrapeGemIndia,     region: 'India',     label: 'GEM India' },
-  find_a_tender_uk: { fn: scrapeFindATender,  region: 'UK',        label: 'Find-a-Tender (UK)' },
-  ungm:             { fn: scrapeUNGM,         region: 'Global',    label: 'UNGM (UN)' },
-  worldbank:        { fn: scrapeWorldBank,    region: 'Global',    label: 'World Bank' },
-  merx_canada:      { fn: scrapeMerxCanada,   region: 'Canada',    label: 'MERX Canada' },
-  austendering:     { fn: scrapeAusTendering, region: 'Australia', label: 'AusTendering' },
-  devex:            { fn: scrapeDevex,        region: 'Global',    label: 'Devex' },
+  sam_gov:           { fn: scrapeSamGov,          region: 'US',           label: 'SAM.gov (US Federal)' },
+  ted_europa:        { fn: scrapeTedEuropa,        region: 'EU',           label: 'TED Europa (EU)' },
+  gem_india:         { fn: scrapeGemIndia,         region: 'India',        label: 'GEM India' },
+  find_a_tender_uk:  { fn: scrapeFindATender,      region: 'UK',           label: 'Find-a-Tender (UK)' },
+  contracts_finder:  { fn: scrapeContractsFinder,  region: 'UK',           label: 'Contracts Finder (UK)' },
+  ungm:              { fn: scrapeUNGM,             region: 'Global',       label: 'UNGM (UN)' },
+  worldbank:         { fn: scrapeWorldBank,        region: 'Global',       label: 'World Bank' },
+  ebrd:              { fn: scrapeEBRD,             region: 'Global',       label: 'EBRD' },
+  adb:               { fn: scrapeADB,              region: 'Asia-Pacific', label: 'ADB (Asian Dev. Bank)' },
+  merx_canada:       { fn: scrapeMerxCanada,       region: 'Canada',       label: 'MERX Canada' },
+  austendering:      { fn: scrapeAusTendering,     region: 'Australia',    label: 'AusTendering' },
 };
 
-// Global sources run with every region combination
-const ALWAYS_ON = new Set(['ungm', 'worldbank', 'devex']);
+// Global sources that run regardless of region selection
+const ALWAYS_ON = new Set(['ungm', 'worldbank', 'ebrd']);
 
 const REGION_SOURCE_MAP = {
-  US:        ['sam_gov'],
-  EU:        ['ted_europa'],
-  UK:        ['find_a_tender_uk'],
-  India:     ['gem_india'],
-  Canada:    ['merx_canada'],
-  Australia: ['austendering'],
+  US:            ['sam_gov'],
+  EU:            ['ted_europa'],
+  UK:            ['find_a_tender_uk', 'contracts_finder'],
+  India:         ['gem_india'],
+  Canada:        ['merx_canada'],
+  Australia:     ['austendering'],
+  'Asia-Pacific':['adb'],
 };
 
 function resolveActiveSources(regions = []) {
@@ -91,7 +106,7 @@ await Actor.main(async () => {
   log.info(`Budget ≥ : $${budget_threshold.toLocaleString()}`);
   log.info(`Closed?  : ${include_closed}`);
 
-  // Resolve proxy
+  // ── Resolve proxy ──────────────────────────────────────────────────────────
   let proxyUrl = null;
   try {
     if (proxy_config?.useApifyProxy) {
@@ -103,13 +118,31 @@ await Actor.main(async () => {
     log.warning('Proxy init failed — running without proxy');
   }
 
+  // ── KEYWORD SPLITTING ──────────────────────────────────────────────────────
+  // FIX: Split user keyword phrases into individual meaningful search terms.
+  //
+  // Example: ["Cardiff Metropolitan University ERP Tenders"]
+  //       → ["cardiff", "metropolitan", "university", "erp"]
+  //
+  // This is critical — search APIs cannot match a 5-word exact phrase.
+  // Without splitting, all scrapers get zero results and fall back to
+  // returning the most recent tenders (unfiltered by keyword).
+  //
+  // Note: splitKeywords strips stopwords like "tender", "service", etc.
+  // so only meaningful search terms are passed to each scraper API.
+  const searchKeywords = keywords.length > 0
+    ? splitKeywords(keywords)
+    : [];  // empty = each scraper uses its default keywords
+
+  log.info(`Search terms: ${searchKeywords.join(', ') || '(defaults per source)'}`);
+
   const activeSources = resolveActiveSources(regions);
   log.info(`Sources  : ${activeSources.map(s => SOURCE_MAP[s].label).join(', ')}\n`);
 
   // ── Parallel scraping ─────────────────────────────────────────────────────
   const limiter = pLimit(3);
   const perSourceLimit = Math.ceil(max_results / activeSources.length) + 20;
-  const scrapeArgs = { keywords, maxResults: perSourceLimit, proxyUrl };
+  const scrapeArgs = { keywords: searchKeywords, maxResults: perSourceLimit, proxyUrl };
   const allRaw = [];
 
   const tasks = activeSources.map(sourceKey =>
@@ -134,15 +167,15 @@ await Actor.main(async () => {
   const dataset = await Actor.openDataset();
   let savedCount = 0;
   const stats = {
-    total_raw: allRaw.length,
-    expired_removed: 0,
-    budget_filtered: 0,
+    total_raw:         allRaw.length,
+    expired_removed:   0,
+    budget_filtered:   0,
     industry_filtered: 0,
-    duplicates_removed: 0,
-    saved: 0,
+    duplicates_removed:0,
+    saved:             0,
   };
 
-  // Open first, newest first
+  // Open tenders first, newest first
   const sorted = allRaw.sort((a, b) => {
     if (a.tender_status === 'Open' && b.tender_status !== 'Open') return -1;
     if (b.tender_status === 'Open' && a.tender_status !== 'Open') return 1;
@@ -222,11 +255,12 @@ await Actor.main(async () => {
     if (savedCount % 25 === 0) log.info(`Progress: ${savedCount}/${max_results}`);
   }
 
-  // Run summary
+  // ── Run summary ───────────────────────────────────────────────────────────
   const kvStore = await Actor.openKeyValueStore();
   await kvStore.setValue('RUN_SUMMARY', {
     run_date: new Date().toISOString(),
     input: { keywords, industry, regions, budget_threshold },
+    search_terms_used: searchKeywords,
     stats,
     sources_used: activeSources.map(s => SOURCE_MAP[s].label),
   });
