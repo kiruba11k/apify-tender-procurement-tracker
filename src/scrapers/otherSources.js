@@ -69,7 +69,15 @@ export async function scrapeADB({ keywords = [], maxResults = 25 } = {}) {
     if (results.length >= maxResults) break;
     try {
       const url = `https://www.adb.org/projects/tenders?q=${encodeURIComponent(keyword)}`;
-      const res = await axios.get(url, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const res = await axios.get(url, {
+        timeout: 20000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: 'https://www.adb.org/',
+        },
+      });
       const $ = load(res.data);
       $('.views-row').each((i, el) => {
         const title = cleanText($(el).find('a').text());
@@ -111,19 +119,42 @@ function mapOcdsRelease(r, source, region) {
 }
 
 // ── Find-a-Tender UK ──────────────────────────────────────────────────
+// Note: the OCDS API (ocdsReleasePackages) only supports date-range params
+// (updatedFrom/updatedTo), not keyword search — using it with `hasKeyword`
+// returns HTTP 400. Use the public search results page (HTML) instead.
 export async function scrapeFindATender({ keywords = [], maxResults = 30 } = {}) {
   const results = [];
+  const { load } = await import('cheerio');
   for (const keyword of (keywords.length ? keywords : ['software', 'IT services'])) {
     if (results.length >= maxResults) break;
     try {
-      const url = `https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages?hasKeyword=${encodeURIComponent(keyword)}`;
-      const res = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      const releases = res.data?.releases || [];
-      for (const r of releases) {
-        if (results.length >= maxResults) break;
-        if (!r.tender?.title) continue;
-        results.push(mapOcdsRelease(r, 'Find-a-Tender UK', 'UK'));
-      }
+      const url = `https://www.find-tender.service.gov.uk/Search/Results?Keywords=${encodeURIComponent(keyword)}`;
+      const res = await axios.get(url, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' } });
+      const $ = load(res.data);
+      $('.app-search-result, .search-result').each((i, el) => {
+        if (results.length >= maxResults) return false;
+        const $el = $(el);
+        const title = cleanText($el.find('a').first().text());
+        const link = $el.find('a').first().attr('href');
+        const org = cleanText($el.find('.app-search-result__organisation, [class*="organisation"]').first().text());
+        const deadline = cleanText($el.find('[class*="deadline"], [class*="closing"]').first().text());
+        if (title) {
+          results.push({
+            organization_name: org || 'UK Public Body',
+            tender_title: title,
+            tender_status: 'Open',
+            description: cleanText($el.find('p').first().text()),
+            category: null,
+            budget_usd: null,
+            budget_raw: null,
+            deadline: parseDate(deadline),
+            announcement_date: null,
+            source_link: link ? (link.startsWith('http') ? link : `https://www.find-tender.service.gov.uk${link}`) : 'https://www.find-tender.service.gov.uk',
+            source: 'Find-a-Tender UK',
+            region: 'UK',
+          });
+        }
+      });
     } catch (err) { console.warn(`[Find-a-Tender] failed for "${keyword}": ${err.message}`); }
     await sleep(500);
   }
