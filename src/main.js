@@ -154,10 +154,13 @@ await Actor.main(async () => {
             raw.tender_status = 'Closed';
         }
 
-        // Filter: specific buyer/company names
+        // Filter: specific buyer/company names — match against organization
+        // name AND title/description, since the named company/university is
+        // often the beneficiary mentioned in the tender text rather than the
+        // contracting authority listed as "buyer".
         if (company_names.length > 0) {
-            const orgLower = (raw.organization_name || '').toLowerCase();
-            if (!company_names.some((cn) => orgLower.includes(cn.toLowerCase()))) {
+            const haystack = `${raw.organization_name || ''} ${raw.tender_title || ''} ${raw.description || ''}`.toLowerCase();
+            if (!company_names.some((cn) => haystack.includes(cn.toLowerCase()))) {
                 droppedCompany++;
                 continue;
             }
