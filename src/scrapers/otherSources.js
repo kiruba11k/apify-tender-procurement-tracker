@@ -295,3 +295,123 @@ export async function scrapeAusTendering({ keywords = [], maxResults = 30 } = {}
   }
   return results;
 }
+
+// ── South Africa eTenders ───────────────────────────────────────────────
+export async function scrapeSouthAfricaETenders({ keywords = [], maxResults = 30 } = {}) {
+  const results = [];
+  const { load } = await import('cheerio');
+  for (const keyword of (keywords.length ? keywords : ['software', 'IT services', 'consulting'])) {
+    if (results.length >= maxResults) break;
+    try {
+      const url = `https://www.etenders.gov.za/Home/opportunities?id=1&q=${encodeURIComponent(keyword)}`;
+      const res = await axios.get(url, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const $ = load(res.data);
+      $('table tbody tr, .tender-row').each((i, el) => {
+        if (results.length >= maxResults) return false;
+        const $el = $(el);
+        const title = cleanText($el.find('a').first().text() || $el.find('td:nth-child(2)').text());
+        const link = $el.find('a').first().attr('href');
+        const org = cleanText($el.find('td:nth-child(3)').first().text());
+        const deadline = cleanText($el.find('td:nth-child(5), [class*="closing"]').first().text());
+        if (title) {
+          results.push({
+            organization_name: org || 'Government of South Africa',
+            tender_title: title,
+            tender_status: 'Open',
+            description: '',
+            category: null,
+            budget_usd: null,
+            budget_raw: null,
+            deadline: parseDate(deadline),
+            announcement_date: null,
+            source_link: link ? (link.startsWith('http') ? link : `https://www.etenders.gov.za${link}`) : 'https://www.etenders.gov.za',
+            source: 'South Africa eTenders',
+            region: 'South Africa',
+          });
+        }
+      });
+    } catch (err) { console.warn(`[SA eTenders] failed for "${keyword}": ${err.message}`); }
+    await sleep(500);
+  }
+  return results;
+}
+
+// ── New Zealand GETS (Government Electronic Tenders Service) ──────────────
+export async function scrapeGetsNZ({ keywords = [], maxResults = 30 } = {}) {
+  const results = [];
+  const { load } = await import('cheerio');
+  for (const keyword of (keywords.length ? keywords : ['software', 'IT services', 'consulting'])) {
+    if (results.length >= maxResults) break;
+    try {
+      const url = `https://www.gets.govt.nz/ExternalIndex.htm?searchText=${encodeURIComponent(keyword)}`;
+      const res = await axios.get(url, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const $ = load(res.data);
+      $('table tbody tr, .search-result').each((i, el) => {
+        if (results.length >= maxResults) return false;
+        const $el = $(el);
+        const title = cleanText($el.find('a').first().text());
+        const link = $el.find('a').first().attr('href');
+        const org = cleanText($el.find('[class*="agency"], td:nth-child(2)').first().text());
+        const deadline = cleanText($el.find('[class*="closing"], td:nth-child(4)').first().text());
+        if (title) {
+          results.push({
+            organization_name: org || 'New Zealand Government',
+            tender_title: title,
+            tender_status: 'Open',
+            description: '',
+            category: null,
+            budget_usd: null,
+            budget_raw: null,
+            deadline: parseDate(deadline),
+            announcement_date: null,
+            source_link: link ? (link.startsWith('http') ? link : `https://www.gets.govt.nz${link}`) : 'https://www.gets.govt.nz',
+            source: 'GETS New Zealand',
+            region: 'New Zealand',
+          });
+        }
+      });
+    } catch (err) { console.warn(`[GETS NZ] failed for "${keyword}": ${err.message}`); }
+    await sleep(500);
+  }
+  return results;
+}
+
+// ── Chile ChileCompra (Mercado Público) ────────────────────────────────────
+export async function scrapeChileCompra({ keywords = [], maxResults = 30 } = {}) {
+  const results = [];
+  const { load } = await import('cheerio');
+  for (const keyword of (keywords.length ? keywords : ['software', 'tecnologia', 'consultoria'])) {
+    if (results.length >= maxResults) break;
+    try {
+      const url = `https://www.mercadopublico.cl/Procurement/Modules/RFB/SearchRFB.aspx?qs=${encodeURIComponent(keyword)}`;
+      const res = await axios.get(url, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const $ = load(res.data);
+      $('table tbody tr, .search-result').each((i, el) => {
+        if (results.length >= maxResults) return false;
+        const $el = $(el);
+        const title = cleanText($el.find('a').first().text());
+        const link = $el.find('a').first().attr('href');
+        const org = cleanText($el.find('td:nth-child(2)').first().text());
+        const deadline = cleanText($el.find('td:nth-child(4), [class*="cierre"]').first().text());
+        if (title) {
+          results.push({
+            organization_name: org || 'Gobierno de Chile',
+            tender_title: title,
+            tender_status: 'Open',
+            description: '',
+            category: null,
+            budget_usd: null,
+            budget_raw: null,
+            deadline: parseDate(deadline),
+            announcement_date: null,
+            source_link: link ? (link.startsWith('http') ? link : `https://www.mercadopublico.cl${link}`) : 'https://www.mercadopublico.cl',
+            source: 'ChileCompra',
+            region: 'Chile',
+          });
+        }
+      });
+    } catch (err) { console.warn(`[ChileCompra] failed for "${keyword}": ${err.message}`); }
+    await sleep(500);
+  }
+  return results;
+}
