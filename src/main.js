@@ -83,6 +83,22 @@ await Actor.main(async () => {
     log.info(`Active sources for regions [${regions.join(', ')}]: ${activeSources.join(', ')}`);
 
     const searchTerms = splitKeywords(keywords);
+    // When specific buyers are named, search for them directly (combined with
+    // each keyword) so sources actually return tenders from that organization —
+    // otherwise a generic keyword search will rarely happen to include them,
+    // and the post-fetch company_names filter would drop everything.
+    const buyerSearchTerms = [];
+    if (company_names.length > 0) {
+        const baseTerms = searchTerms.length ? searchTerms : ['tender'];
+        for (const company of company_names) {
+            for (const term of baseTerms) {
+                buyerSearchTerms.push(`${company} ${term}`);
+            }
+            buyerSearchTerms.push(company);
+        }
+    }
+    const effectiveSearchTerms = [...new Set([...searchTerms, ...buyerSearchTerms])];
+
     const limiter = pLimit(3);
     const allRaw = [];
 
@@ -90,7 +106,7 @@ await Actor.main(async () => {
         limiter(async () => {
             const src = SOURCE_MAP[sourceKey];
             try {
-                const items = await src.fn({ keywords: searchTerms.length ? searchTerms : keywords, maxResults: max_results, proxyUrl });
+                const items = await src.fn({ keywords: effectiveSearchTerms.length ? effectiveSearchTerms : keywords, maxResults: max_results, proxyUrl });
                 log.info(`[${src.label}] Fetched ${items.length} raw tenders`);
                 allRaw.push(...items);
             } catch (err) {
