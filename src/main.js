@@ -86,24 +86,11 @@ await Actor.main(async () => {
     log.info(`Active sources for regions [${regions.join(', ')}]: ${activeSources.join(', ')}`);
 
     const searchTerms = splitKeywords(keywords);
-    // When specific buyers are named, search for them directly (combined with
-    // each keyword) so sources actually return tenders from that organization —
-    // otherwise a generic keyword search will rarely happen to include them,
-    // and the post-fetch company_names filter would drop everything.
-    const buyerSearchTerms = [];
-    if (company_names.length > 0) {
-        const baseTerms = searchTerms.length ? searchTerms : ['tender'];
-        for (const company of company_names) {
-            for (const term of baseTerms) {
-                buyerSearchTerms.push(`${company} ${term}`);
-            }
-            buyerSearchTerms.push(company);
-        }
-    }
-    const effectiveSearchTerms = [...new Set([...searchTerms, ...buyerSearchTerms])];
+    const effectiveSearchTerms = searchTerms;
 
     const limiter = pLimit(3);
     const allRaw = [];
+    const companyRaw = [];
 
     const tasks = activeSources.map((sourceKey) =>
         limiter(async () => {
@@ -111,9 +98,7 @@ await Actor.main(async () => {
             try {
                 // Each scraper applies maxResults as a per-keyword cap, so give it
                 // enough headroom to try every search term (the final dataset is
-                // still capped at max_results below). Otherwise the first keyword
-                // alone fills the budget and later terms (e.g. buyer-specific
-                // searches) never run.
+                // still capped at max_results below).
                 const perSourceCap = Math.max(max_results, max_results * effectiveSearchTerms.length, 25);
                 const items = await src.fn({ keywords: effectiveSearchTerms.length ? effectiveSearchTerms : keywords, maxResults: perSourceCap, proxyUrl });
                 log.info(`[${src.label}] Fetched ${items.length} raw tenders`);
@@ -124,7 +109,29 @@ await Actor.main(async () => {
         })
     );
 
-    await Promise.all(tasks);
+    // Dedicated search per named company/university — searched on its own
+    // (not combined with tech keywords), since portal search engines mostly
+    // ignore multi-word queries and just return generic recent results.
+    // This lets us find the buyer's *most recent* tender even if it predates
+    // the keyword-driven results above.
+    const companyTasks = [];
+    for (const company of company_names) {
+        for (const sourceKey of activeSources) {
+            const src = SOURCE_MAP[sourceKey];
+            companyTasks.push(
+                limiter(async () => {
+                    try {
+                        const items = await src.fn({ keywords: [company], maxResults: 25, proxyUrl });
+                        companyRaw.push(...items.map((it) => ({ ...it, _company: company })));
+                    } catch (err) {
+                        log.error(`[${src.label}] Company search for "${company}" failed: ${err.message}`);
+                    }
+                })
+            );
+        }
+    }
+
+    await Promise.all([...tasks, ...companyTasks]);
 
     resetDedup();
     const dataset = await Actor.openDataset();
@@ -135,6 +142,23 @@ await Actor.main(async () => {
     let droppedBudget = 0;
     let droppedDuplicate = 0;
     let droppedCompany = 0;
+
+    const buildOutput = (raw, category, confidence) => ({
+        organization_name: raw.organization_name,
+        tender_title: raw.tender_title,
+        tender_status: raw.tender_status === 'Closed' ? 'Closed' : 'Open',
+        category,
+        budget: raw.budget_usd != null ? formatBudget(raw.budget_usd) : (raw.budget_raw || null),
+        budget_usd: raw.budget_usd ?? null,
+        deadline: raw.deadline || null,
+        announcement_date: raw.announcement_date || null,
+        source_link: raw.source_link,
+        source: raw.source,
+        region: raw.region || null,
+        description: raw.description || '',
+        classification_confidence: confidence,
+        scraped_at: new Date().toISOString(),
+    });
 
     for (const raw of allRaw) {
         if (!raw || !raw.tender_title || !raw.organization_name) continue;
@@ -182,25 +206,41 @@ await Actor.main(async () => {
             continue;
         }
 
-        await dataset.pushData({
-            organization_name: raw.organization_name,
-            tender_title: raw.tender_title,
-            tender_status: raw.tender_status === 'Closed' ? 'Closed' : 'Open',
-            category: raw.category,
-            budget: raw.budget_usd != null ? formatBudget(raw.budget_usd) : (raw.budget_raw || null),
-            budget_usd: raw.budget_usd ?? null,
-            deadline: raw.deadline || null,
-            announcement_date: raw.announcement_date || null,
-            source_link: raw.source_link,
-            source: raw.source,
-            region: raw.region || null,
-            description: raw.description || '',
-            classification_confidence: confidence,
-            scraped_at: new Date().toISOString(),
-        });
+        await dataset.pushData(buildOutput(raw, category, confidence));
         pushed++;
 
         if (pushed >= max_results) break;
+    }
+
+    // For each named company/university, surface their single most recent
+    // tender (by announcement date, falling back to deadline) regardless of
+    // the strict expiry/ICP/budget filters above — "most recent tender from
+    // this org" is the explicit ask, even if it has since closed.
+    if (company_names.length > 0) {
+        for (const company of company_names) {
+            const companyLower = company.toLowerCase();
+            const matches = companyRaw.filter((raw) => {
+                if (!raw?.tender_title || !raw?.organization_name) return false;
+                const haystack = `${raw.organization_name} ${raw.tender_title} ${raw.description || ''}`.toLowerCase();
+                return haystack.includes(companyLower);
+            });
+
+            matches.sort((a, b) => {
+                const aDate = a.announcement_date || a.deadline || '';
+                const bDate = b.announcement_date || b.deadline || '';
+                return bDate.localeCompare(aDate);
+            });
+
+            const best = matches.find((raw) => !isDuplicate({ ...raw, organization_name: `${raw.organization_name}` }));
+            if (best) {
+                if (isExpired(best.deadline)) best.tender_status = 'Closed';
+                const { category, confidence } = classifyTender(best.tender_title, best.description);
+                await dataset.pushData({ ...buildOutput(best, category, confidence), matched_company: company });
+                pushed++;
+            } else {
+                log.info(`No tenders found for company/university: "${company}"`);
+            }
+        }
     }
 
     log.info(`✅ Run Complete. Pushed: ${pushed} | Dropped — expired: ${droppedExpired}, duplicate: ${droppedDuplicate}, ICP: ${droppedIcp}, budget: ${droppedBudget}, company: ${droppedCompany}`);
