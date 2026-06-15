@@ -38,12 +38,15 @@ const REGION_SOURCES = {
     India: ['gem_india'],
     Canada: ['merx_canada'],
     Australia: ['austendering'],
-    Global: ['ungm', 'worldbank', 'ebrd', 'adb'],
+    // EBRD and ADB endpoints currently return 404/403 on every request
+    // (dead/blocked) — excluded to avoid wasted calls; kept implemented
+    // in otherSources.js in case the endpoints come back online.
+    Global: ['ungm', 'worldbank'],
 };
 
 function resolveActiveSources(regions = []) {
     if (!regions.length || regions.includes('Global')) {
-        return Object.keys(SOURCE_MAP);
+        return Object.keys(SOURCE_MAP).filter((key) => key !== 'ebrd' && key !== 'adb');
     }
     const active = new Set();
     for (const region of regions) {
@@ -106,7 +109,13 @@ await Actor.main(async () => {
         limiter(async () => {
             const src = SOURCE_MAP[sourceKey];
             try {
-                const items = await src.fn({ keywords: effectiveSearchTerms.length ? effectiveSearchTerms : keywords, maxResults: max_results, proxyUrl });
+                // Each scraper applies maxResults as a per-keyword cap, so give it
+                // enough headroom to try every search term (the final dataset is
+                // still capped at max_results below). Otherwise the first keyword
+                // alone fills the budget and later terms (e.g. buyer-specific
+                // searches) never run.
+                const perSourceCap = Math.max(max_results, max_results * effectiveSearchTerms.length, 25);
+                const items = await src.fn({ keywords: effectiveSearchTerms.length ? effectiveSearchTerms : keywords, maxResults: perSourceCap, proxyUrl });
                 log.info(`[${src.label}] Fetched ${items.length} raw tenders`);
                 allRaw.push(...items);
             } catch (err) {
