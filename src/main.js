@@ -14,6 +14,9 @@ import {
     scrapeAusTendering,
     scrapeEBRD,
     scrapeADB,
+    scrapeSouthAfricaETenders,
+    scrapeGetsNZ,
+    scrapeChileCompra,
 } from './scrapers/otherSources.js';
 
 const SOURCE_MAP = {
@@ -28,6 +31,9 @@ const SOURCE_MAP = {
     adb: { fn: scrapeADB, label: 'ADB (Asian Dev. Bank)' },
     merx_canada: { fn: scrapeMerxCanada, label: 'MERX Canada' },
     austendering: { fn: scrapeAusTendering, label: 'AusTendering' },
+    sa_etenders: { fn: scrapeSouthAfricaETenders, label: 'South Africa eTenders' },
+    gets_nz: { fn: scrapeGetsNZ, label: 'GETS New Zealand' },
+    chilecompra: { fn: scrapeChileCompra, label: 'ChileCompra' },
 };
 
 // Which sources are relevant for each requested region
@@ -38,6 +44,9 @@ const REGION_SOURCES = {
     India: ['gem_india'],
     Canada: ['merx_canada'],
     Australia: ['austendering'],
+    'New Zealand': ['gets_nz'],
+    'South Africa': ['sa_etenders'],
+    Chile: ['chilecompra'],
     // EBRD and ADB endpoints currently return 404/403 on every request
     // (dead/blocked) — excluded to avoid wasted calls; kept implemented
     // in otherSources.js in case the endpoints come back online.
@@ -121,7 +130,12 @@ await Actor.main(async () => {
             companyTasks.push(
                 limiter(async () => {
                     try {
-                        const items = await src.fn({ keywords: [company], maxResults: 25, proxyUrl });
+                        // Note: several free portal endpoints (Contracts Finder,
+                        // Find-a-Tender) appear to ignore the keyword/search param
+                        // and just return their latest notices. Fetch a larger pool
+                        // per source so the local text-match below has a realistic
+                        // chance of finding a notice mentioning this company.
+                        const items = await src.fn({ keywords: [company], maxResults: 100, proxyUrl });
                         companyRaw.push(...items.map((it) => ({ ...it, _company: company })));
                     } catch (err) {
                         log.error(`[${src.label}] Company search for "${company}" failed: ${err.message}`);
