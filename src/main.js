@@ -1,6 +1,5 @@
 import { Actor, log } from 'apify';
 import pLimit from 'p-limit';
-import dayjs from 'dayjs';
 import { classifyTender, isIcpRelevant, splitKeywords } from './classifiers/categoryClassifier.js';
 import { isExpired, isRecentlyClosed, isDuplicate, resetDedup, formatBudget } from './utils/helpers.js';
 import { scrapeSamGov } from './scrapers/samGov.js';
@@ -14,7 +13,7 @@ import {
     scrapeMerxCanada,
     scrapeAusTendering,
     scrapeEBRD,
-    scrapeADB, // This must match the export in otherSources.js
+    scrapeADB,
 } from './scrapers/otherSources.js';
 
 const SOURCE_MAP = {
@@ -31,6 +30,30 @@ const SOURCE_MAP = {
     austendering: { fn: scrapeAusTendering, label: 'AusTendering' },
 };
 
+// Which sources are relevant for each requested region
+const REGION_SOURCES = {
+    US: ['sam_gov'],
+    EU: ['ted_europa'],
+    UK: ['find_a_tender_uk', 'contracts_finder'],
+    India: ['gem_india'],
+    Canada: ['merx_canada'],
+    Australia: ['austendering'],
+    Global: ['ungm', 'worldbank', 'ebrd', 'adb'],
+};
+
+function resolveActiveSources(regions = []) {
+    if (!regions.length || regions.includes('Global')) {
+        return Object.keys(SOURCE_MAP);
+    }
+    const active = new Set();
+    for (const region of regions) {
+        for (const key of (REGION_SOURCES[region] || [])) active.add(key);
+    }
+    // Always include the Global/multilateral sources for broader coverage
+    for (const key of REGION_SOURCES.Global) active.add(key);
+    return [...active];
+}
+
 await Actor.main(async () => {
     const input = await Actor.getInput();
     const {
@@ -38,27 +61,37 @@ await Actor.main(async () => {
         company_names = [],
         industry = 'All',
         regions = ['Global'],
-        max_results = 100,
-        proxy_config = { useApifyProxy: true }
+        budget_threshold = 0,
+        max_results = 200,
+        include_closed = false,
+        proxy_config = { useApifyProxy: true },
     } = input || {};
 
-    log.info('🚀 Starting Scraper...');
+    log.info('🚀 Starting Tender & Procurement Tracker...');
 
     let proxyUrl = null;
     if (proxy_config?.useApifyProxy) {
-        const proxy = await Actor.createProxyConfiguration(proxy_config);
-        proxyUrl = await proxy.newUrl();
+        try {
+            const proxy = await Actor.createProxyConfiguration(proxy_config);
+            proxyUrl = proxy ? await proxy.newUrl() : null;
+        } catch (err) {
+            log.warning(`Proxy configuration failed, continuing without proxy: ${err.message}`);
+        }
     }
 
-    const activeSources = Object.keys(SOURCE_MAP);
-    const limiter = pLimit(2);
+    const activeSources = resolveActiveSources(regions);
+    log.info(`Active sources for regions [${regions.join(', ')}]: ${activeSources.join(', ')}`);
+
+    const searchTerms = splitKeywords(keywords);
+    const limiter = pLimit(3);
     const allRaw = [];
 
-    const tasks = activeSources.map(sourceKey =>
+    const tasks = activeSources.map((sourceKey) =>
         limiter(async () => {
             const src = SOURCE_MAP[sourceKey];
             try {
-                const items = await src.fn({ keywords, maxResults: max_results, proxyUrl });
+                const items = await src.fn({ keywords: searchTerms.length ? searchTerms : keywords, maxResults: max_results, proxyUrl });
+                log.info(`[${src.label}] Fetched ${items.length} raw tenders`);
                 allRaw.push(...items);
             } catch (err) {
                 log.error(`[${src.label}] Failed: ${err.message}`);
@@ -71,22 +104,76 @@ await Actor.main(async () => {
     resetDedup();
     const dataset = await Actor.openDataset();
 
+    let pushed = 0;
+    let droppedExpired = 0;
+    let droppedIcp = 0;
+    let droppedBudget = 0;
+    let droppedDuplicate = 0;
+    let droppedCompany = 0;
+
     for (const raw of allRaw) {
-        // Strict Company Filter
-        if (company_names.length > 0) {
-            const orgLower = (raw.organization_name || '').toLowerCase();
-            if (!company_names.some(cn => orgLower.includes(cn.toLowerCase()))) continue;
+        if (!raw || !raw.tender_title || !raw.organization_name) continue;
+
+        // Rule: remove duplicate tenders (same org + title across sources)
+        if (isDuplicate(raw)) {
+            droppedDuplicate++;
+            continue;
         }
 
+        // Rule: remove expired tenders (unless caller wants recently-closed ones too)
+        if (isExpired(raw.deadline)) {
+            if (!(include_closed && isRecentlyClosed(raw.deadline))) {
+                droppedExpired++;
+                continue;
+            }
+            raw.tender_status = 'Closed';
+        }
+
+        // Filter: specific buyer/company names
+        if (company_names.length > 0) {
+            const orgLower = (raw.organization_name || '').toLowerCase();
+            if (!company_names.some((cn) => orgLower.includes(cn.toLowerCase()))) {
+                droppedCompany++;
+                continue;
+            }
+        }
+
+        // Classify category before ICP relevance check (industry → category mapping)
         const { category, confidence } = classifyTender(raw.tender_title, raw.description);
         raw.category = category;
 
+        // Filter: ICP relevance (keywords + industry)
+        if (!isIcpRelevant(raw, keywords, industry)) {
+            droppedIcp++;
+            continue;
+        }
+
+        // Rule: exclude low-value tenders below budget_threshold (only when budget is known)
+        if (budget_threshold > 0 && raw.budget_usd != null && raw.budget_usd < budget_threshold) {
+            droppedBudget++;
+            continue;
+        }
+
         await dataset.pushData({
-            ...raw,
+            organization_name: raw.organization_name,
+            tender_title: raw.tender_title,
+            tender_status: raw.tender_status === 'Closed' ? 'Closed' : 'Open',
+            category: raw.category,
+            budget: raw.budget_usd != null ? formatBudget(raw.budget_usd) : (raw.budget_raw || null),
+            budget_usd: raw.budget_usd ?? null,
+            deadline: raw.deadline || null,
+            announcement_date: raw.announcement_date || null,
+            source_link: raw.source_link,
+            source: raw.source,
+            region: raw.region || null,
+            description: raw.description || '',
             classification_confidence: confidence,
-            scraped_at: new Date().toISOString()
+            scraped_at: new Date().toISOString(),
         });
+        pushed++;
+
+        if (pushed >= max_results) break;
     }
 
-    log.info('✅ Run Complete.');
+    log.info(`✅ Run Complete. Pushed: ${pushed} | Dropped — expired: ${droppedExpired}, duplicate: ${droppedDuplicate}, ICP: ${droppedIcp}, budget: ${droppedBudget}, company: ${droppedCompany}`);
 });
