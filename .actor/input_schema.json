@@ -34,7 +34,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["US", "EU", "UK", "India", "Canada", "Australia", "Global"]
+        "enum": ["US", "EU", "UK", "India", "Canada", "Australia", "New Zealand", "South Africa", "Chile", "Global"]
       },
       "editor": "select",
       "default": ["US", "EU", "India"]
