@@ -157,22 +157,26 @@ await Actor.main(async () => {
     let droppedDuplicate = 0;
     let droppedCompany = 0;
 
-    const buildOutput = (raw, category, confidence) => ({
-        organization_name: raw.organization_name,
-        tender_title: raw.tender_title,
-        tender_status: raw.tender_status === 'Closed' ? 'Closed' : 'Open',
-        category,
-        budget: raw.budget_usd != null ? formatBudget(raw.budget_usd) : (raw.budget_raw || null),
-        budget_usd: raw.budget_usd ?? null,
-        deadline: raw.deadline || null,
-        announcement_date: raw.announcement_date || null,
-        source_link: raw.source_link,
-        source: raw.source,
-        region: raw.region || null,
-        description: raw.description || '',
-        classification_confidence: confidence,
-        scraped_at: new Date().toISOString(),
-    });
+    const buildOutput = (raw, category, confidence) => {
+        const expired = isExpired(raw.deadline);
+        return {
+            organization_name: raw.organization_name,
+            tender_title: raw.tender_title,
+            tender_status: expired ? 'Closed' : (raw.tender_status === 'Closed' ? 'Closed' : 'Open'),
+            is_expired: expired,
+            category,
+            budget: raw.budget_usd != null ? formatBudget(raw.budget_usd) : (raw.budget_raw || null),
+            budget_usd: raw.budget_usd ?? null,
+            deadline: raw.deadline || null,
+            announcement_date: raw.announcement_date || null,
+            source_link: raw.source_link,
+            source: raw.source,
+            region: raw.region || null,
+            description: raw.description || '',
+            classification_confidence: confidence,
+            scraped_at: new Date().toISOString(),
+        };
+    };
 
     for (const raw of allRaw) {
         if (!raw || !raw.tender_title || !raw.organization_name) continue;
@@ -183,76 +187,80 @@ await Actor.main(async () => {
             continue;
         }
 
-        // Rule: remove expired tenders (unless caller wants recently-closed ones too)
-        if (isExpired(raw.deadline)) {
-            if (!(include_closed && isRecentlyClosed(raw.deadline))) {
+        // Check company match BEFORE expiry so company-relevant tenders
+        // are never silently dropped — expired ones are included with
+        // tender_status: "Closed" and is_expired: true.
+        const companyMatch = company_names.length === 0 || (() => {
+            const haystack = `${raw.organization_name || ''} ${raw.tender_title || ''} ${raw.description || ''}`.toLowerCase();
+            return company_names.some((cn) => haystack.includes(cn.toLowerCase()));
+        })();
+
+        const expired = isExpired(raw.deadline);
+
+        if (!companyMatch) {
+            // Non-company tenders: apply strict expiry rule
+            if (expired && !(include_closed && isRecentlyClosed(raw.deadline))) {
                 droppedExpired++;
                 continue;
             }
-            raw.tender_status = 'Closed';
-        }
-
-        // Filter: specific buyer/company names — match against organization
-        // name AND title/description, since the named company/university is
-        // often the beneficiary mentioned in the tender text rather than the
-        // contracting authority listed as "buyer".
-        if (company_names.length > 0) {
-            const haystack = `${raw.organization_name || ''} ${raw.tender_title || ''} ${raw.description || ''}`.toLowerCase();
-            if (!company_names.some((cn) => haystack.includes(cn.toLowerCase()))) {
-                droppedCompany++;
-                continue;
-            }
-        }
-
-        // Classify category before ICP relevance check (industry → category mapping)
-        const { category, confidence } = classifyTender(raw.tender_title, raw.description);
-        raw.category = category;
-
-        // Filter: ICP relevance (keywords + industry)
-        if (!isIcpRelevant(raw, keywords, industry)) {
-            droppedIcp++;
+            droppedCompany++;
             continue;
         }
 
-        // Rule: exclude low-value tenders below budget_threshold (only when budget is known)
+        // Company-matched tender: always include, regardless of expiry
+        // (expired ones surface with is_expired: true, tender_status: Closed)
+
+        // Classify category
+        const { category, confidence } = classifyTender(raw.tender_title, raw.description);
+        raw.category = category;
+
+        // ICP relevance — still apply but don't drop company matches on it
+        // (mark them and pass through)
+        const icpPass = isIcpRelevant(raw, keywords, industry);
+
+        // Budget threshold — skip only if budget is known and below threshold
         if (budget_threshold > 0 && raw.budget_usd != null && raw.budget_usd < budget_threshold) {
             droppedBudget++;
             continue;
         }
 
-        await dataset.pushData(buildOutput(raw, category, confidence));
+        await dataset.pushData({ ...buildOutput(raw, category, confidence), icp_relevant: icpPass });
         pushed++;
 
         if (pushed >= max_results) break;
     }
 
-    // For each named company/university, surface their single most recent
-    // tender (by announcement date, falling back to deadline) regardless of
-    // the strict expiry/ICP/budget filters above — "most recent tender from
-    // this org" is the explicit ask, even if it has since closed.
+    // Dedicated company pass: surface ALL matching tenders from the targeted
+    // company search pool (not just the most recent one), including expired ones.
     if (company_names.length > 0) {
         for (const company of company_names) {
             const companyLower = company.toLowerCase();
-            const matches = companyRaw.filter((raw) => {
-                if (!raw?.tender_title || !raw?.organization_name) return false;
-                const haystack = `${raw.organization_name} ${raw.tender_title} ${raw.description || ''}`.toLowerCase();
-                return haystack.includes(companyLower);
-            });
+            const matches = companyRaw
+                .filter((raw) => {
+                    if (!raw?.tender_title || !raw?.organization_name) return false;
+                    const haystack = `${raw.organization_name} ${raw.tender_title} ${raw.description || ''}`.toLowerCase();
+                    return haystack.includes(companyLower);
+                })
+                .sort((a, b) => {
+                    const aDate = a.announcement_date || a.deadline || '';
+                    const bDate = b.announcement_date || b.deadline || '';
+                    return bDate.localeCompare(aDate);
+                });
 
-            matches.sort((a, b) => {
-                const aDate = a.announcement_date || a.deadline || '';
-                const bDate = b.announcement_date || b.deadline || '';
-                return bDate.localeCompare(aDate);
-            });
-
-            const best = matches.find((raw) => !isDuplicate({ ...raw, organization_name: `${raw.organization_name}` }));
-            if (best) {
-                if (isExpired(best.deadline)) best.tender_status = 'Closed';
-                const { category, confidence } = classifyTender(best.tender_title, best.description);
-                await dataset.pushData({ ...buildOutput(best, category, confidence), matched_company: company });
+            let companyPushed = 0;
+            for (const raw of matches) {
+                if (isDuplicate(raw)) continue;
+                const { category, confidence } = classifyTender(raw.tender_title, raw.description);
+                await dataset.pushData({ ...buildOutput(raw, category, confidence), matched_company: company });
                 pushed++;
+                companyPushed++;
+                if (pushed >= max_results) break;
+            }
+
+            if (companyPushed === 0) {
+                log.info(`No tenders found for "${company}" in current portal snapshot — the portal may not have recent results from this buyer or keyword search is not being applied server-side.`);
             } else {
-                log.info(`No tenders found for company/university: "${company}"`);
+                log.info(`[Company match] Pushed ${companyPushed} tender(s) for "${company}"`);
             }
         }
     }
